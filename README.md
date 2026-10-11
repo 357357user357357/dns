@@ -5,6 +5,45 @@ tooling. One server per nameserver; each host runs NSD bound to its own
 public IP (never the wildcard — that collides with `systemd-resolved`'s
 loopback stub on modern Debian/Ubuntu).
 
+## Recursive resolver (Unbound)
+
+`deploy/install-unbound.sh <relay-ip>` installs Unbound as a **recursive**
+resolver alongside NSD (authoritative). Port layout on the host:
+
+- `53` — NSD (authoritative zones)
+- `127.0.0.1:53` and `<public-ip>:5353` — Unbound (recursion)
+
+Recursion is restricted twice, by design:
+
+1. **Unbound ACL** — only loopback, the host's own public IP (the VLESS
+   hairpin path used by sing-box's `socks-out` detour) and `<relay-ip>` are
+   allowed; everyone else gets REFUSED.
+2. **iptables** — `<public-ip>:5353` accepts only sources `<public-ip>` and
+   `<relay-ip>`; all other SYNs are dropped (`iptables -L INPUT | grep 5353`).
+
+Point the VPN tunnel at it (bc-vpn):
+
+```bash
+sudo pkill -f bc-singbox ; sleep 2
+BC_PROXY_DNS='tcp://<turkey-ip>:5353' bc-vpn connect
+```
+
+Verify from each vantage:
+
+```bash
+# hairpin (server itself — same path the tunnel uses)
+dig @<public-ip> -p 5353 example.org SOA +short
+# relay (allowlisted)
+ssh root@<relay-ip> dig @<public-ip> -p 5353 example.org SOA +short
+# stranger (must NOT answer; SYNs land in the iptables DROP counter)
+curl -m 6 http://<public-ip>:5353/
+```
+
+Note: a probe from a sing-box TUN client is NOT a stranger test — the
+`{ protocol: dns, action: hijack-dns }` route rule intercepts DNS traffic on
+any port before it leaves the machine. Use a non-DNS probe (curl) or an
+independent host for negative tests.
+
 ## Layout
 
 - `zones/` — zone files, one file per zone, named `<zone>.zone`
